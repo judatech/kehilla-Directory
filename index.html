@@ -290,6 +290,7 @@
     position: sticky;
     top: calc(var(--safe-top) + 76px);
     z-index: 10;
+    scroll-margin-top: calc(var(--safe-top) + 132px);
   }
   .section-head .letter {
     font-family: 'Noto Sans Hebrew', serif;
@@ -853,7 +854,7 @@
   //    privately hosted copy with a domain-restricted, quota-capped key.
   //
   // 3. NEITHER (default): a clean house icon that links out to live Street View.
-  const PHOTOS_BAKED = true;          // set to true after baking photos
+  const PHOTOS_BAKED = false;          // set to true after baking photos
   const PHOTOS_DIR = 'photos';         // folder holding 0.jpg, 1.jpg, ...
   const PHOTOS_EXT = 'jpg';
   const STREETVIEW_API_KEY = '';       // e.g. 'AIza...' (live mode only)
@@ -890,10 +891,72 @@
     return s.toString().replace(/[\u0591-\u05C7]/g,'').toLowerCase().trim();
   }
   function digits(s){ return (s||'').replace(/[^0-9]/g,''); }
+
+  // ===== Hebrew <-> Latin phonetic search =====
+  // Maps each Hebrew letter to its Latin sound, so a name typed in English
+  // letters (e.g. "oberlander", "grosz", "kohn") matches the Hebrew entry,
+  // and vice-versa. Designed for Ashkenazi/Yiddish community names.
+  const HEB2LAT = {
+    'א':'',  'ב':'b', 'ג':'g', 'ד':'d', 'ה':'h', 'ו':'v', 'ז':'z',
+    'ח':'ch','ט':'t', 'י':'i', 'כ':'k', 'ך':'k', 'ל':'l', 'מ':'m',
+    'ם':'m', 'נ':'n', 'ן':'n', 'ס':'s', 'ע':'',  'פ':'p', 'ף':'p',
+    'צ':'tz','ץ':'tz','ק':'k', 'ר':'r', 'ש':'sh','ת':'t'
+  };
+
+  function translit(heb) {
+    if (!heb) return '';
+    let out = '';
+    const s = heb.replace(/[\u0591-\u05C7]/g,''); // strip nikkud
+    for (let i=0;i<s.length;i++){
+      const c = s[i];
+      if (c === 'ו' && s[i+1] === 'ו') { out += 'v'; i++; continue; } // וו -> v/w
+      if (c === 'י' && s[i+1] === 'י') { out += 'i'; i++; continue; } // יי -> i
+      if (HEB2LAT.hasOwnProperty(c)) out += HEB2LAT[c];
+      else if (/[a-z]/i.test(c)) out += c.toLowerCase();
+      else if (c === ' ') out += ' ';
+    }
+    return out;
+  }
+
+  // Collapse a Latin string to a spelling-insensitive "sound skeleton" so that
+  // grosz/gross/gros, kohn/cohen/kohen, schwartz/shvarts, etc. all match.
+  function soundKey(s) {
+    if (!s) return '';
+    let x = s.toLowerCase();
+    x = x.replace(/[\u0591-\u05C7]/g,'');
+    x = x.replace(/[^a-z\u05d0-\u05ea ]/g,''); // keep latin + hebrew letters
+    // If it contains Hebrew, transliterate first
+    if (/[\u05d0-\u05ea]/.test(x)) x = translit(x);
+    x = x.toLowerCase();
+    // phonetic folding
+    x = x.replace(/sch/g,'sh')      // schwartz -> shwartz
+         .replace(/tsch/g,'ch')
+         .replace(/[ckq]/g,'k')      // c, q -> k
+         .replace(/ph/g,'f')
+         .replace(/w/g,'v')          // w -> v
+         .replace(/ck/g,'k')
+         .replace(/tz|ts|cz/g,'z')   // tz/ts -> z-ish
+         .replace(/sz/g,'s')         // polish sz -> s
+         .replace(/sh/g,'s')         // sh -> s (fold)
+         .replace(/ch|kh/g,'k')      // ch/kh (guttural) -> k
+         .replace(/x/g,'ks')
+         .replace(/j/g,'i')
+         .replace(/[aeiou]/g,'')     // drop vowels (most variation is here)
+         .replace(/(.)\1+/g,'$1');   // collapse doubles
+    return x.trim();
+  }
+
   function esc(s){
     if (s==null) return '';
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
+
+  // Precompute a phonetic skeleton for every contact (Hebrew name + English name)
+  DATA.forEach(function(r){
+    const heb = [r.lastName, r.firstName].filter(Boolean).join(' ');
+    const en  = [r.lastNameEn, r.firstNameEn].filter(Boolean).join(' ');
+    r._sk = (soundKey(heb) + ' ' + soundKey(en)).trim();
+  });
 
   function avatarColor(rec) {
     const key = (rec.lastNameEn || rec.lastName || '?').charCodeAt(0) || 0;
@@ -929,6 +992,13 @@
     const qn = norm(q);
     const fields = [r.lastName,r.firstName,r.titleBefore,r.titleAfter,r.inLaw,r.address,r.lastNameEn,r.firstNameEn];
     for (const f of fields) if (norm(f).includes(qn)) return true;
+    // Phonetic / cross-script match: type a name in English letters and still
+    // find the Hebrew entry (and vice-versa). Needs >=2 letters to avoid noise.
+    const qLetters = qn.replace(/[^a-z\u05d0-\u05ea]/g,'');
+    if (qLetters.length >= 2) {
+      const qsk = soundKey(qn);
+      if (qsk && r._sk && r._sk.includes(qsk)) return true;
+    }
     if (qd && qd.length>=2) {
       if (digits(r.phone).includes(qd)) return true;
       if (digits(r.mobileM).includes(qd)) return true;
@@ -1067,7 +1137,13 @@
       if (!set.has(L)) b.className='dim';
       else b.addEventListener('click', ()=>{
         const t = document.getElementById('sec-'+L);
-        if (t) t.scrollIntoView({behavior:'smooth', block:'start'});
+        if (!t) return;
+        // Compute target accounting for the sticky top bar + section header height,
+        // so jumps land correctly whether scrolling up or down.
+        const topbar = document.querySelector('.topbar');
+        const offset = (topbar ? topbar.offsetHeight : 90) + 12;
+        const y = t.getBoundingClientRect().top + window.pageYOffset - offset;
+        window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
       });
       $rail.appendChild(b);
     });
